@@ -357,9 +357,16 @@ namespace compass_calibrator
                                 else if (hwrev == 40) {
                                     boardtype_string = "navX-Micro";
                                 }
+<<<<<<< HEAD
 								else if ((hwrev >= 60) && (hwrev <= 69)) {
 									boardtype_string = "VMX-pi";
 								}
+=======
+                                else if ((hwrev >= 60) && (hwrev <= 69))
+                                {
+                                    boardtype_string = "VMX-pi";
+                                } 
+>>>>>>> navX-PI-Dev
                                 string msg = "Board type:  " + boardtype_string + " (" + boardtype + ")\n" +
                                                  "H/W Rev:  " + hwrev + "\n" +
                                                  "F/W Rev:  " + fw_major + "." + fw_minor + "." + fw_revision + "\n" +

@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include "usb_serial.h"
 #include <math.h>
 #include "helper_3dmath.h"
+#include "navx-mxp_hal.h"
 
 extern "C" {
 #include "mpl.h"
@@ -274,7 +275,11 @@ _EXTERN_ATTRIB void mpu_get_mag_cal_data(struct mag_calibration_data *caldata) {
  * ISR context. In this example, it sets a flag protecting the FIFO read
  * function.
  */
+<<<<<<< HEAD
 static void gyro_data_ready_cb(unsigned char irq)
+=======
+static void gyro_data_ready_cb(uint8_t gpio_pin)
+>>>>>>> navX-PI-Dev
 {
     hal.new_gyro = 1;
 }
@@ -562,7 +567,7 @@ _EXTERN_ATTRIB int sense_current_mpu_yaw_orientation( uint8_t *mpu_yaw_axis, boo
     /* Find the axis, if any, which has a value close to +/- 1g */
     for ( int i = 0; i < 3; i++) {
         accel_data_g[i] = (((float)raw_accel_data[i]) / (32768.0 / accel_fsr));
-        if ( ( fabs(accel_data_g[i]) > .8 ) && ( fabs(accel_data_g[i]) < 1.2 ) ) {
+        if ( ( fabs(accel_data_g[i]) > .65 ) && ( fabs(accel_data_g[i]) < 1.35 ) ) {
             if ( valid_yaw_axis == INVALID_AXIS ) {
                 valid_yaw_axis = i;
                 valid_axis_up = (accel_data_g[i] > 0);
@@ -798,9 +803,11 @@ _EXTERN_ATTRIB int get_dmp_data( struct mpu_data *pdata )
     FloatVectorStruct gravity;
     short sensors;
     unsigned char more;
+    uint64_t hires_timestamp;
     if ( !hal.new_gyro ) return -1;
     if ( NULL == pdata ) return -1;
 
+    hires_timestamp = HAL_IOCX_HIGHRESTIMER_Get();
     get_ms(&sensor_timestamp);
     if (!dmp_read_fifo(gyro, accel_short, pdata->quaternion, &sensor_timestamp_dmp_fifo, &sensors, &more) ) {
 
@@ -1153,6 +1160,7 @@ _EXTERN_ATTRIB int get_dmp_data( struct mpu_data *pdata )
             pdata->raw_accel[2] = accel_short[2];
 
             pdata->timestamp = sensor_timestamp;
+            pdata->hires_timestamp = hires_timestamp;
         }
         return 0;
     } else {
@@ -1181,17 +1189,18 @@ _EXTERN_ATTRIB int mpu_did_dmp_gyro_biases_change(struct mpu_dmp_calibration_dat
     GYRO_BIAS curr_gyro_bias;
     int gyro_bias_cmp;
     int changed = 0;
-    mpu_read_mem(D_EXT_GYRO_BIAS_X,12,curr_gyro_bias.dmp_gyro_bias_bytes);
-    gyro_bias_cmp = memcmp(curr_gyro_bias.dmp_gyro_bias_bytes,last_dmp_gyro_bias,12);
-    if ( gyro_bias_cmp != 0 ) {
-        changed = 1;
-        memcpy(last_dmp_gyro_bias,curr_gyro_bias.dmp_gyro_bias_bytes,12);
-        for ( int i = 0; i < 3; i++ ) {
-            /* Convert from big-endian to little-endian */
-            uint32_t big_endian_bias = curr_gyro_bias.dmp_gyro_bias_big_endian[i];
-            dmpcaldata->gyro_bias_q16[i] = (int32_t)__REV(big_endian_bias);
-        }
-        dmpcaldata->mpu_temp_c = last_temperature / 65536.0;
+    if (!mpu_read_mem(D_EXT_GYRO_BIAS_X,12,curr_gyro_bias.dmp_gyro_bias_bytes)) {
+		gyro_bias_cmp = memcmp(curr_gyro_bias.dmp_gyro_bias_bytes,last_dmp_gyro_bias,12);
+		if ( gyro_bias_cmp != 0 ) {
+			changed = 1;
+			memcpy(last_dmp_gyro_bias,curr_gyro_bias.dmp_gyro_bias_bytes,12);
+			for ( int i = 0; i < 3; i++ ) {
+				/* Convert from big-endian to little-endian */
+				uint32_t big_endian_bias = curr_gyro_bias.dmp_gyro_bias_big_endian[i];
+				dmpcaldata->gyro_bias_q16[i] = (int32_t)__REV(big_endian_bias);
+			}
+			dmpcaldata->mpu_temp_c = last_temperature / 65536.0;
+		}
     }
     return changed;
 }

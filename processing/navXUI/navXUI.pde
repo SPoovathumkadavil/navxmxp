@@ -824,7 +824,11 @@ void updateBoardType( AHRSProtocol.BoardID board_id ) {
       board_type = "navX-MXP";
     } else if ( board_id.hw_rev == 40 ) {
       board_type = "navX-Micro";    
+<<<<<<< HEAD
     } else if (( board_id.hw_rev >= 60 ) && ( board_id.hw_rev <= 69 )) {
+=======
+    } else if (( board_id.hw_rev >= 60 ) && ( board_id.hw_rev <= 69)) {
+>>>>>>> navX-PI-Dev
       board_type = "VMX-pi";    
     }
     g_boardtype = board_type;

@@ -28,6 +28,7 @@ extern "C" {
 #include "mpucontroller.h"
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_spi.h"
+#include "SPICommCtrl.h"
 }
 
 #include "navx-mxp.h"
@@ -41,17 +42,14 @@ extern "C" {
 #include "FlashStorage.h"
 #include "ext_interrupts.h"
 
-#ifdef NAVX_PI_BOARD_TEST
-#include "NavXPiBoardTest.h"
-NavXPiBoardTest *p_navxpi_boardtest;
-#endif
-
 extern I2C_HandleTypeDef hi2c3; /* External I2C Interface */
 extern I2C_HandleTypeDef hi2c2; /* Internal I2C Interface (to MPU, etc.) */
 extern SPI_HandleTypeDef hspi1; /* External SPI Interface */
 
 TIM_HandleTypeDef TimHandle; /* Internal Timer */
 FlashStorageClass FlashStorage; /* Class managing persistent configuration data */
+
+void SpiTxTimeoutCheck();
 
 int prepare_i2c_receive_timeout_count = 0;
 unsigned long prepare_i2c_receive_last_attempt_timestamp = 0;
@@ -62,13 +60,37 @@ HAL_StatusTypeDef prepare_next_i2c_receive();
 
 #define RXBUFFERSIZE 64
 uint8_t i2c3_RxBuffer[RXBUFFERSIZE];
-uint8_t spi1_RxBuffer[RXBUFFERSIZE];
+uint8_t spi1_RxBuffer[MAX_SPI_MSG_LEN+1];
+
+#define NUM_SPI_BANKS 5
+
+loop_func p_loop_func[NUM_SPI_BANKS] = { NULL, NULL, NULL, NULL, NULL };
+register_lookup_func p_reg_lookup_func[NUM_SPI_BANKS] = { NULL, NULL, NULL, NULL, NULL };
+register_write_func p_reg_write_func[NUM_SPI_BANKS] = { NULL, NULL, NULL, NULL, NULL };
+
+_EXTERN_ATTRIB void nav10_set_loop(uint8_t bank, loop_func p) { p_loop_func[bank] = p; }
+_EXTERN_ATTRIB void nav10_set_register_lookup_func(uint8_t bank, register_lookup_func p) { p_reg_lookup_func[bank] = p; }
+_EXTERN_ATTRIB void nav10_set_register_write_func(uint8_t bank, register_write_func p) { p_reg_write_func[bank] = p; }
 
 #define MIN_SAMPLE_RATE_HZ 4
 #define MAX_SAMPLE_RATE_HZ 200
 
 #define UART_RX_PACKET_TIMEOUT_MS 	30 /* Max wait after start of packet */
 #define MIN_UART_MESSAGE_LENGTH		STREAM_CMD_MESSAGE_LENGTH
+
+#ifdef ENABLE_BANKED_REGISTERS
+#include "SPICommCtrl.h"
+#define		SPI_RECV_LENGTH STD_SPI_MSG_LEN
+			/* SPI Requests:  Write:  [Bank] [0x80 | RegAddr] [Count (1-4)] [4 bytes of write data] [CRC] */
+			/*                *If bank = 0, 1-byte write is used, and count is the byte to be written.    */
+			/*                Read:   [Bank] [RegAddr] [Count] [CRC] [4 bytes are ignored]                */
+#define		MAX_VALID_BANK  NUM_SPI_BANKS
+#else
+#define		SPI_RECV_LENGTH 3	/* SPI Requests:  [0x80 | RegAddr] [Count (Readd) or Data (Write)] [CRC] (Bank 0 is implicitly used) */
+#define     MAX_VALID_BANK  0
+#endif
+
+static bool ext_spi_init_complete = false;
 
 uint8_t clip_sample_rate(uint8_t update_rate_hz)
 {
@@ -150,8 +172,9 @@ struct __attribute__ ((__packed__)) nav10_protocol_registers {
     uint8_t                 cal_status;
     uint8_t                 selftest_status;
     uint16_t                capability_flags;
+    uint16_t                fw_revision;
     /* Reserved */
-    uint8_t                 reserved[3];
+    uint8_t                 reserved;
     /* Processed Data */
     uint16_t                sensor_status;
     uint32_t                timestamp;
@@ -171,10 +194,10 @@ struct __attribute__ ((__packed__)) nav10_protocol_registers {
     s_1616_float            barometric_pressure;
     s_short_hundred_float   pressure_sensor_temp_c;
     s_short_hundred_float   yaw_offset;
-    s_short_ratio_float     quat_offset[4];
+    uint64_t				hires_timestamp;
     /* Integrated Values */
     /* - Read/Write Registers */
-uint16_t                    integration_control;
+    uint16_t				integration_control;
     /* - Read-only Registers */
     s_1616_float            velocity[3];
     s_1616_float            displacement[3];
@@ -289,7 +312,9 @@ uint16_t get_capability_flags()
     capability_flags |= (NAVX_CAPABILITY_FLAG_OMNIMOUNT +
             NAVX_CAPABILITY_FLAG_VEL_AND_DISP +
             NAVX_CAPABILITY_FLAG_YAW_RESET +
-            NAVX_CAPABILITY_FLAG_AHRSPOS_TS);
+            NAVX_CAPABILITY_FLAG_AHRSPOS_TS +
+            NAVX_CAPABILITY_FLAG_FW_REVISION +
+            NAVX_CAPABILITY_FLAG_HIRES_TIMESTAMP);
     uint16_t yaw_axis_info =
             (((struct flash_cal_data *)flashdata)->orientationdata.yaw_axis << 1) +
             ((((struct flash_cal_data *)flashdata)->orientationdata.yaw_axis_up) ? 1 : 0);
@@ -321,10 +346,11 @@ _EXTERN_ATTRIB void nav10_init()
     IMURegisters::buildCRCLookupTable(crc_lookup_table, sizeof(crc_lookup_table));
 
     registers.op_status		= NAVX_OP_STATUS_INITIALIZING;
-    registers.hw_rev		= NAVX_HARDWARE_REV;
+    registers.hw_rev		= HAL_GetBoardRev();
     registers.identifier	= NAVX_MODEL_NAVX_MXP;
     registers.fw_major		= NAVX_MXP_FIRMWARE_VERSION_MAJOR;
     registers.fw_minor		= NAVX_MXP_FIRMWARE_VERSION_MINOR;
+    registers.fw_revision	= NAVX_MXP_REVISION;
     read_unique_id(&chipid);
     update_capability_flags();
 
@@ -337,7 +363,7 @@ _EXTERN_ATTRIB void nav10_init()
     TimHandle.Instance = TIM11;
     /* Compute the prescaler value to have TIM11 counter clock equal to 10 KHz */
     uint32_t uwPrescalerValue = (uint32_t) (SystemCoreClock / 10000) - 1;
-    /* Initialize TIM3 peripheral for 250ms Interrupt */
+    /* Initialize TIM11 peripheral for 250ms Interrupt */
     TimHandle.Init.Period = 2500 - 1;
     TimHandle.Init.Prescaler = uwPrescalerValue;
     TimHandle.Init.ClockDivision = 0;
@@ -360,9 +386,17 @@ _EXTERN_ATTRIB void nav10_init()
 
     /* Power on the on-board I2C devices */
     HAL_I2C_Power_On();
-    HAL_Delay(1000);
+    HAL_Delay(100);
 
     FlashStorage.init(sizeof(flash_cal_data));
+
+    /* Initiate Data Reception on slave SPI Interface, if it is enabled. */
+    if ( HAL_SPI_Slave_Enabled() ) {
+        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, SPI_RECV_LENGTH);
+        HAL_SPI_Comm_Ready_Assert();
+    }
+
+    ext_spi_init_complete = true;
 
     mpu_initialize(MPU9250_INT_Pin);
     enable_dmp();
@@ -463,24 +497,16 @@ _EXTERN_ATTRIB void nav10_init()
     HAL_NVIC_SetPriority((IRQn_Type)EXTI9_5_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ((IRQn_Type)EXTI9_5_IRQn);
 
-    if((MPU9250_INT_Pin > 9) ||(CAL_BTN_Pin > 9)) {
-    	HAL_NVIC_EnableIRQ((IRQn_Type)EXTI15_10_IRQn);
-    }
-
-    /* Initiate Data Reception on slave SPI Interface, if it is enabled. */
-    if ( HAL_SPI_Slave_Enabled() ) {
-        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, 3);
+    /* NavX-PI:  Enable EXTI on pins 10-15 */
+    if((MPU9250_INT_Pin > GPIO_PIN_9) ||(CAL_BTN_Pin > GPIO_PIN_9)) {
+        HAL_NVIC_SetPriority((IRQn_Type)EXTI15_10_IRQn, 5, 0);
+        HAL_NVIC_EnableIRQ((IRQn_Type)EXTI15_10_IRQn);
     }
 
     /* Initiate Data Reception on slave I2C Interface */
 #ifndef DISABLE_EXTERNAL_I2C_INTERFACE
     prepare_next_i2c_receive();
 #endif
-
-#ifdef NAVX_PI_BOARD_TEST
-    p_navxpi_boardtest = new NavXPiBoardTest();
-#endif
-
 }
 
 struct mpu_data mpudata;
@@ -495,7 +521,11 @@ int caldata_clear_count = 0;            /* Protection against flash wear */
 
 #define BUTTON_DEBOUNCE_SAMPLES 10
 
+<<<<<<< HEAD
 static void cal_button_isr(unsigned char)
+=======
+static void cal_button_isr(uint8_t gpio_pin)
+>>>>>>> navX-PI-Dev
 {
     /* If CAL button held down for sufficient duration, clear accel/gyro cal data */
     bool button_pressed = false;
@@ -636,7 +666,7 @@ _EXTERN_ATTRIB void nav10_main()
         num_serial_interfaces++;
     }
 
-    attachInterrupt(GPIO_PIN_9,&cal_button_isr,CHANGE);
+    attachInterrupt(CAL_BTN_Pin,&cal_button_isr,CHANGE);
 
     if ( start_timestamp == 0 ) {
         start_timestamp = HAL_GetTick();
@@ -644,10 +674,6 @@ _EXTERN_ATTRIB void nav10_main()
 
     while (1)
     {
-#ifdef NAVX_PI_BOARD_TEST
-    	p_navxpi_boardtest->loop();
-#endif
-
         bool send_stream_response[2] = { false, false };
         bool send_mag_cal_response[2] = { false, false };
         bool send_tuning_var_set_response[2] = { false, false };
@@ -663,6 +689,8 @@ _EXTERN_ATTRIB void nav10_main()
         int num_resp_bytes[2] = { 0, 0 };
 
         periodic_compass_update();
+
+        SpiTxTimeoutCheck();
 
         if ( sample_rate_update ) {
             if ( new_sample_rate != 0 ) {
@@ -747,6 +775,7 @@ _EXTERN_ATTRIB void nav10_main()
                 registers.barometric_pressure = 0;			/* Todo:  update from pressure sensor */
                 registers.pressure_sensor_temp_c = 0;		/* Todo:  update from pressure sensor */
                 registers.timestamp = mpudata.timestamp;
+                registers.hires_timestamp = mpudata.hires_timestamp;
                 for ( int i = 0; i < 4; i++ ) {
                     registers.quat[i] = IMURegisters::encodeRatioFloat(
                             (float)(mpudata.quaternion[i] >> 16) / 16384.0f);
@@ -1094,9 +1123,12 @@ _EXTERN_ATTRIB void nav10_main()
                 bool rising_edge_trigger = false;
                 bool falling_edge_trigger = false;
                 bool pull_up_direction = false;
-                temp = SYSCFG->EXTICR[2];
+                if ((MPU9250_INT_GPIO_Port == GPIOC) || (MPU9250_INT_GPIO_Port == GPIOD)){
+                	// MPU Interrupt is in Group C or D
+                	temp = SYSCFG->EXTICR[2];
+                }
                 if ( temp & 0x00000003 ) {
-                    /* EXTI8 is enabled for GPIOC Group */
+                    /* EXTI8 is enabled for GPIOC/GPIOD Group */
                     group_enabled = true;
                 }
                 temp = EXTI->IMR;
@@ -1120,20 +1152,22 @@ _EXTERN_ATTRIB void nav10_main()
                     pull_up_direction = true;
                 }
 
-                /* HACK:  For some reason, in certain error cases (e.g., when  */
-                /* power to I2C/SPI/UART is removed and then re-applied), the  */
-                /* PC8 Interrupt Mask is disabled.  For the navX-MXP, this     */
-                /* condition causes further MPU interrupts to be missed.       */
-                /* Therefore, whenever this condition is detected, re-         */
-                /* configure GPIO pin : PC8 (MPU) for rising-edge interrupts   */
-                GPIO_InitTypeDef GPIO_InitStruct;
+                if (!group_enabled || !pin_masked_in || !rising_edge_trigger || falling_edge_trigger || pull_up_direction) {
+					/* HACK:  For some reason, in certain error cases (e.g., when  */
+					/* power to I2C/SPI/UART is removed and then re-applied), the  */
+					/* PC8 Interrupt Mask is disabled.  For the navX-MXP, this     */
+					/* condition causes further MPU interrupts to be missed.       */
+					/* Therefore, whenever this condition is detected, re-         */
+					/* configure GPIO pin : PC8 (MPU) for rising-edge interrupts   */
+					GPIO_InitTypeDef GPIO_InitStruct;
 
-                GPIO_InitStruct.Pin = GPIO_PIN_8;
-                GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-                GPIO_InitStruct.Pull = GPIO_NOPULL;
-                HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-                last_scan = timestamp;
-                i2c_interrupt_reset_count++;
+					GPIO_InitStruct.Pin = GPIO_PIN_8;
+					GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+					GPIO_InitStruct.Pull = GPIO_NOPULL;
+					HAL_GPIO_Init(MPU9250_INT_GPIO_Port, &GPIO_InitStruct);
+					i2c_interrupt_reset_count++;
+                }
+				last_scan = timestamp;
 #ifdef DEBUG_I2C_COMM
                 for ( int ifx = 0; ifx < num_serial_interfaces; ifx++ ) {
                     serial_interfaces[ifx]->println("Scanning");
@@ -1387,6 +1421,7 @@ _EXTERN_ATTRIB void nav10_main()
                 }
             }
             NVIC_EnableIRQ((IRQn_Type)I2C3_EV_IRQn);
+           	HAL_AHRS_Int_Assert();
         }
 
         /* Peform I2C Glitch Detection/Correction */
@@ -1401,12 +1436,18 @@ _EXTERN_ATTRIB void nav10_main()
                 }
             }
         }
+
+        for ( int i = 0; i < NUM_SPI_BANKS; i++) {
+        	if ( p_loop_func[i] != NULL ) {
+        		p_loop_func[i]();
+        	}
+        }
     }
 }
 
 __STATIC_INLINE uint8_t *GetRegisterAddressAndMaximumSize( uint8_t register_address, uint16_t& size )
 {
-    if ( register_address > NAVX_REG_LAST) {
+    if ( register_address > NAVX_REG_LAST ) {
         size = 0;
         return 0;
     }
@@ -1661,80 +1702,249 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *I2cHandle)
     }
 }
 
-bool spi_transmitting = false;
-uint8_t spi_bytes_to_be_transmitted = 0;
-unsigned long last_spi_tx_start_timestamp = 0;
-#define SPI_TX_TIMEOUT_MS ((unsigned long)10)
+typedef enum  {
+    NONE,
+    WRITE_REQ,    /* SPI Master sent write request to SPI Slave */
+    READ_REQ,     /* SPI Master sent read request to SPI Slave. */
+    READ_RESP,    /* SPI Slave is sending reponse to read request from SPI Master. */
+    SLAVE_RX_ERR, /* SPI Slave received an invalid request, which was discarded, or rx overflow occurred. */
+    SLAVE_TX_ERR  /* Error occurred during SPI Slave transmit [NOTE:  not an error if BUSY error occurs. */
+} SPI_MSG_TYPE;
 
-void Reset_SPI() {
+bool spi_transmitting = false;                  // TRUE:  SPI Slave Transmit in progress (awaiting Master to complete Read)
+SPI_MSG_TYPE spi_last_valid_msg_type = NONE;    // Previous valid spi transaction type
+SPI_MSG_TYPE spi_last_err_msg_type = NONE;      // Previous invalid spi transaction type
+uint8_t spi_last_read_req_len = 0;              // # Bytes to be transmitted in curr/previous SPI Slave Transmit
+uint8_t spi_last_read_req_reg_addr = 0;         // Starting register address of last READ_REQ
+uint8_t spi_last_read_req_bank = 0;             // Register Bank # of last READ_REQ
+uint8_t spi_last_write_req_len = 0;             // # Bytes last written in curr/previous WRITE_REQ
+uint8_t spi_last_write_req_reg_addr = 0;        // Starting register address of last WRITE_REQ
+uint8_t spi_last_write_req_bank = 0;            // Register Bank # of last WRITE_REQ
+uint32_t spi_SR_at_beginning_of_last_write = 0;
+unsigned long last_spi_tx_start_timestamp = 0;  // Timestamp when last SPI Slave Transmit was initiated
+#define SPI_TX_TIMEOUT_MS ((unsigned long)10)   // Max allowed duration of in-progress SPI Slave Transmit
+
+/* SPI Error Counts */
+int wrong_size_spi_receive_count = 0;           // SPI Slave Receive w/invalid byte count
+int invalid_char_spi_receive_count = 0;         // SPI Slave Receive w/CRC err, bad address or count
+int invalid_reg_address_spi_count = 0;          // SPI Slave Receive contained Invalid Register Address
+int spi_error_count = 0;                        // SPI Slave Error Callback count
+int spi_ovr_error_count = 0;                    // SPI Slave Receive Overflow count
+int spi_txne_error_count = 0;                   // SPI Slave Transmit (TXNE) Underflow count [e.g., DMA Underrun;
+                                                // (this can also occur during cleanup of a SPI Transmit Timeout)
+int spi_rxne_error_count = 0;                   // During SPI Slave Receive, data lost because RX register was full
+int spi_busy_error_count = 0;                   // SPI Busy after SPI Slave Transmit completed [caused by Silicon bug]
+int spi_rx_while_tx_error_count = 0;            // SPI Data Receive Callback invoked during SPI Slave Transmit ['impossible' condition]
+int spi_tx_complete_timeout_count = 0;          // SPI Slave Transmit completion timeout [protocol error]
+uint32_t last_spi_tx_complete_timeout_xfer_size = 0;
+uint32_t last_spi_tx_complete_timeout_xfer_count = 0;
+uint32_t last_spi_tx_complete_timeout_error_code = 0;
+uint32_t last_spi_tx_complete_timeout_SR = 0;
+
+void Reset_SPI_And_PrepareToReceive() {
+    HAL_SPI_Comm_Ready_Deassert();
     HAL_SPI_DeInit(&hspi1);
     HAL_SPI_Init(&hspi1);
     spi_transmitting = false;
-    HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, 3);
+    __HAL_SPI_CLEAR_OVRFLAG(&hspi1);
+    HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, SPI_RECV_LENGTH);
+    HAL_SPI_Comm_Ready_Assert();
 }
 
-int wrong_size_spi_receive_count = 0;
-int invalid_char_spi_receive_count = 0;
-int invalid_reg_address_spi_count = 0;
-int spi_error_count = 0;
-int spi_ovr_error_count = 0;
-int spi_tx_complete_timeout_count = 0;
+// This function should be polled periodically (at least once every
+// SPI_TX_TIMEOUT_MS period).
+//
+// If the SPI transmitter has been waiting more than the timeout period
+// to complete the transmission, disable the transmitter and prepare
+// again to receive data.
+void SpiTxTimeoutCheck() {
+    if (spi_transmitting) {
+    	unsigned long last_spi_txt_start = last_spi_tx_start_timestamp;
+        unsigned long now = HAL_GetTick();
+        if (now > last_spi_txt_start) {
+        	unsigned long transmit_period = now - last_spi_txt_start;
+        	if (transmit_period > SPI_TX_TIMEOUT_MS) {
+        		last_spi_tx_complete_timeout_xfer_size = hspi1.TxXferSize;
+        		last_spi_tx_complete_timeout_xfer_count = hspi1.TxXferCount;
+        		last_spi_tx_complete_timeout_error_code = hspi1.ErrorCode;
+        		last_spi_tx_complete_timeout_SR = hspi1.Instance->SR;
+        		Reset_SPI_And_PrepareToReceive();
+        		spi_tx_complete_timeout_count++;
+        	}
+        }
+    }
+}
 
-uint8_t spi_tx_buffer[NAVX_REG_LAST + 1];
+#ifdef ENABLE_BANKED_REGISTERS
+int spi_rx_variable_message_len = 0;
+uint8_t dummy;
+#endif
+
+uint8_t spi_tx_buffer[255];
 
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    uint8_t *reg_addr;
+	if (!ext_spi_init_complete) return;
+
+    uint8_t *reg_addr = 0;
     uint16_t max_size;
     uint8_t reg_address;
     uint8_t reg_count;
     uint8_t received_crc;
     uint8_t calculated_crc;
+    uint8_t bank;
     bool write = false;
     if ( hspi->Instance == SPI1 ) {
+
         if ( !spi_transmitting ) {
             int num_bytes_received = hspi->RxXferSize - hspi->RxXferCount;
-            if ( num_bytes_received == 3 ) {
+#ifdef ENABLE_BANKED_REGISTERS
+            uint8_t *received_data;
+            if ((num_bytes_received == SPI_RECV_LENGTH ) ||
+            	((spi_rx_variable_message_len > 0) && (num_bytes_received == spi_rx_variable_message_len))) {
+            	bank = spi1_RxBuffer[0];
+            	reg_address = spi1_RxBuffer[1];
+            	reg_count = spi1_RxBuffer[2]; /* Bank 0: This is the byte to write; Bank > 0:  count of bytes to be written */
+            	received_data = &spi1_RxBuffer[3];
+            	if(spi_rx_variable_message_len > 0) {
+            		spi_rx_variable_message_len = 0;
+            	}
+#else
+            if ( num_bytes_received == SPI_RECV_LENGTH ) {
+            	bank = 0;
                 reg_address = spi1_RxBuffer[0];
                 reg_count = spi1_RxBuffer[1];
-                received_crc = spi1_RxBuffer[2];
-                calculated_crc = IMURegisters::getCRCWithTable(crc_lookup_table,spi1_RxBuffer,2);
+#endif
+                received_crc = spi1_RxBuffer[num_bytes_received-1];
+                calculated_crc = IMURegisters::getCRCWithTable(crc_lookup_table,spi1_RxBuffer,num_bytes_received-1);
                 if ( ( reg_address != 0xFF ) && (reg_count > 0 ) && ( received_crc == calculated_crc ) ) {
                     if ( reg_address & 0x80 ) {
                         write = true;
                         reg_address &= ~0x80;
                     }
-                    reg_addr = GetRegisterAddressAndMaximumSize(reg_address, max_size);
+#ifdef ENABLE_BANKED_REGISTERS
+                    if (bank < NUM_SPI_BANKS) {
+                    	if (bank == 0) {
+                           	reg_addr = GetRegisterAddressAndMaximumSize(reg_address, max_size);
+                    	} else if (p_reg_lookup_func[bank] != NULL) {
+                    		reg_addr = p_reg_lookup_func[bank](bank, reg_address, reg_count, &max_size);
+                    	}
+                    } else if (bank == COMM_MODE_BANK) {
+                    	reg_addr = &dummy; /* Special mode does not access reg_addr */
+                    } else if (bank >= NUM_SPI_BANKS) {
+                    	reg_addr = 0; /* Invalid Bank Requested */
+                    }
+                    else
+#endif
+                    {
+                    	reg_addr = GetRegisterAddressAndMaximumSize(reg_address, max_size);
+                    }
                     if ( reg_addr ) {
-                        if ( write ) {
-                            process_writable_register_update( reg_address, reg_addr, reg_count /* value */ );
-                            HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer,3);
+                    	if ( write ) {
+                    	    // Write Request
+                    		HAL_SPI_Comm_Ready_Deassert();
+                    		uint8_t next_rcv_size = SPI_RECV_LENGTH;
+#ifdef ENABLE_BANKED_REGISTERS
+                    		if (bank <= NUM_SPI_BANKS) {
+                    			if (bank == 0) {
+                               		process_writable_register_update( reg_address, reg_addr, reg_count /* value */ );
+                    			} else if(p_reg_write_func[bank] != NULL) {
+                    				p_reg_write_func[bank](bank, reg_address, reg_addr, reg_count, received_data);
+                    			}
+                    		} else if (bank == COMM_MODE_BANK) {
+                            	if (reg_address == COMM_MODE_REG_VARIABLEWRITE ) {
+                            		/* Next transaction is variable len write; len is in defined by count */
+                            		next_rcv_size = reg_count;
+                            		spi_rx_variable_message_len = next_rcv_size;
+                            	}
+                            }
+#else
+                    		process_writable_register_update( reg_address, reg_addr, reg_count /* value */ );
+#endif
+
+							spi_last_valid_msg_type = WRITE_REQ;
+                            spi_last_write_req_len = (bank == 0) ? 1 : reg_count;
+                            spi_last_write_req_reg_addr = reg_address;
+                            spi_last_write_req_bank = bank;
+                            __HAL_SPI_CLEAR_OVRFLAG(hspi);
+                    		HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, next_rcv_size);
+                            HAL_SPI_Comm_Ready_Assert();
                         } else {
-                            spi_transmitting = true;
-                            spi_bytes_to_be_transmitted = (reg_count > max_size) ? max_size : reg_count;
-                            memcpy(spi_tx_buffer,reg_addr,spi_bytes_to_be_transmitted);
-                            spi_tx_buffer[spi_bytes_to_be_transmitted] =
+                            // Read Request
+                            if (bank == 0) {
+                                HAL_AHRS_Int_Deassert();
+                            }
+                        	spi_transmitting = true;
+                            spi_last_read_req_len = (reg_count > max_size) ? max_size : reg_count;
+                            spi_last_read_req_reg_addr = reg_address;
+                            spi_last_read_req_bank = bank;
+                            memcpy(spi_tx_buffer,reg_addr,spi_last_read_req_len);
+                            spi_tx_buffer[spi_last_read_req_len] =
                                     IMURegisters::getCRCWithTable(crc_lookup_table, spi_tx_buffer,
-                                                                  (uint8_t)spi_bytes_to_be_transmitted);
-                            HAL_SPI_Transmit_DMA(&hspi1, spi_tx_buffer, spi_bytes_to_be_transmitted+1);
+                                                                  (uint8_t)spi_last_read_req_len);
+                            spi_last_valid_msg_type = READ_REQ;
+                            spi_SR_at_beginning_of_last_write = hspi->Instance->SR;
+                            __HAL_SPI_CLEAR_OVRFLAG(hspi);
+                            __HAL_SPI_DISABLE(hspi);
+                            HAL_SPI_Transmit_DMA(&hspi1, spi_tx_buffer, spi_last_read_req_len+1);
                             last_spi_tx_start_timestamp = HAL_GetTick();
+                        	HAL_SPI_Comm_Ready_Deassert();
                         }
                     } else {
                         invalid_reg_address_spi_count++;
-                        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer,3);
+                        spi_last_err_msg_type = SLAVE_RX_ERR;
+                        __HAL_SPI_CLEAR_OVRFLAG(hspi);
+                        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, SPI_RECV_LENGTH);
+                        HAL_SPI_Comm_Ready_Assert();
                     }
                 } else {
                     invalid_char_spi_receive_count++;
+                    spi_last_err_msg_type = SLAVE_RX_ERR;
                     /* If repeated invalid requests are received, and if the */
                     /* SPI interface is still busy, reset the SPI interface. */
-                    /* This condition occurs sometimes after the RoboRIO     */
+                    /* This condition can occurs sometimes after the         */
                     /* host computer is power-cycled.                        */
+<<<<<<< HEAD
                     Reset_SPI();
+=======
+#if 0
+                    if ( ( (invalid_char_spi_receive_count % 5) == 0 ) &&
+                         ( __HAL_SPI_GET_FLAG(&hspi1,SPI_FLAG_BSY) != RESET ) ) {
+                        Reset_SPI_And_PrepareToReceive();
+                   } else {
+                       Reset_SPI_And_PrepareToReceive();
+                       HAL_SPI_Comm_Ready_Assert(); /* This shouldn't be necessary - remove it! */
+                   }
+#endif
+                    if ( ( __HAL_SPI_GET_FLAG(&hspi1,SPI_FLAG_BSY) != RESET ) ) {
+                        Reset_SPI_And_PrepareToReceive();
+                   } else {
+#ifdef ENABLE_BANKED_REGISTERS
+						if(spi_rx_variable_message_len > 0) {
+							spi_rx_variable_message_len = 0;
+						}
+#endif
+						__HAL_SPI_CLEAR_OVRFLAG(hspi);
+                       HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, SPI_RECV_LENGTH);
+                	   HAL_SPI_Comm_Ready_Assert();
+                   }
+>>>>>>> navX-PI-Dev
                 }
             } else {
+                spi_last_err_msg_type = SLAVE_RX_ERR;
                 wrong_size_spi_receive_count++;
-                HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer,3);
+#ifdef ENABLE_BANKED_REGISTERS
+            	if(spi_rx_variable_message_len > 0) {
+            		spi_rx_variable_message_len = 0;
+            	}
+#endif
+                __HAL_SPI_CLEAR_OVRFLAG(hspi);
+                HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, SPI_RECV_LENGTH);
+                HAL_SPI_Comm_Ready_Assert();
             }
+        } else {
+            // A SPI receive event occurred while transmitting.  This should never happen!
+            spi_rx_while_tx_error_count++;
         }
     }
 }
@@ -1748,12 +1958,44 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 
         /* Clear the error, and prepare for next receive.                             */
         spi_error_count++;
-        spi_transmitting = false;
-        if ( hspi->ErrorCode == HAL_SPI_ERROR_OVR) {
+        if ((hspi->ErrorCode & HAL_SPI_ERROR_OVR) != 0) {
             __HAL_SPI_CLEAR_OVRFLAG(hspi);
+            spi_last_err_msg_type = spi_transmitting ? SLAVE_TX_ERR : SLAVE_RX_ERR;
             spi_ovr_error_count++;
         }
-        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, 3);
+
+        if ((hspi->ErrorCode == HAL_SPI_ERROR_FLAG) != 0) {
+        	/* Either RXNE,TXE, BSY flags are set.  It's also possible the OVR flag is set. */
+        	uint32_t status_bits = hspi->Instance->SR;
+        	if (status_bits & 0x00000001) {
+        	    spi_last_err_msg_type = spi_transmitting ? SLAVE_TX_ERR : SLAVE_RX_ERR;
+        	    spi_rxne_error_count++;
+        	}
+        	if (spi_transmitting) {
+        	    // Transmitter NE is only an error during SPI Slave Transmit
+        	    if ((status_bits & 0x00000002) == 0) {
+        	        spi_last_err_msg_type = SLAVE_TX_ERR;
+        	        spi_txne_error_count++;
+        	    }
+        	}
+        	if (status_bits & 0x00000040) {
+                __HAL_SPI_CLEAR_OVRFLAG(hspi);
+                spi_last_err_msg_type = spi_transmitting ? SLAVE_TX_ERR : SLAVE_RX_ERR;
+                spi_ovr_error_count++;
+        	}
+        	if (status_bits & 0x00000080) {
+        	    // NOTE:  This occurs often due to a silicon bug
+        	    // Therefore, this is not considered a SLAVE_TX_ERR.
+        		spi_busy_error_count++;
+                /* Disable the SPI, which clears the busy condition   */
+        		/* (SPI will be reenabled upon the next invocation of */
+        		/* HAL_SPI_Receive_DMA or HAL_SPI_Transmit_DMA)       */
+                __HAL_SPI_DISABLE(hspi);
+        	}
+        }
+        spi_transmitting = false;
+        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, SPI_RECV_LENGTH);
+        HAL_SPI_Comm_Ready_Assert();
     }
 }
 
@@ -1761,7 +2003,8 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if ( hspi->Instance == SPI1 ) {
         spi_transmitting = false;
-        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, 3);
+        __HAL_SPI_CLEAR_OVRFLAG(hspi);
+        HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)spi1_RxBuffer, SPI_RECV_LENGTH);
+        HAL_SPI_Comm_Ready_Assert();
     }
 }
-

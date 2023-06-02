@@ -35,6 +35,7 @@
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx.h"
 #include "stm32f4xx_it.h"
+#include "navx-mxp_hal.h"
 /* USER CODE BEGIN 0 */
 
 /* USER CODE END 0 */
@@ -46,10 +47,19 @@ extern DMA_HandleTypeDef hdma_i2c3_tx;
 extern SPI_HandleTypeDef hspi1;
 extern DMA_HandleTypeDef hdma_usart6_tx;
 extern UART_HandleTypeDef huart6;
+extern TIM_HandleTypeDef	StartupTimHandle;
 extern TIM_HandleTypeDef    TimHandle;
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern DMA_HandleTypeDef hdma_spi1_rx;
 extern DMA_HandleTypeDef hdma_adc1;
+extern ADC_HandleTypeDef hadc1;
+extern TIM_HandleTypeDef htim1;
+extern TIM_HandleTypeDef htim2;
+extern TIM_HandleTypeDef htim3;
+extern TIM_HandleTypeDef htim4;
+extern TIM_HandleTypeDef htim5;
+extern TIM_HandleTypeDef htim9;
+
 /******************************************************************************/
 /*            Cortex-M4 Processor Interruption and Exception Handlers         */ 
 /******************************************************************************/
@@ -115,6 +125,20 @@ void DMA1_Stream4_IRQHandler(void)
 }
 
 /**
+* @brief This function handles ADC1 global interrupt.
+*/
+void ADC_IRQHandler(void)
+{
+  /* USER CODE BEGIN ADC_IRQn 0 */
+
+  /* USER CODE END ADC_IRQn 0 */
+  HAL_ADC_IRQHandler(&hadc1);
+  /* USER CODE BEGIN ADC_IRQn 1 */
+
+  /* USER CODE END ADC_IRQn 1 */
+}
+
+/**
 * @brief This function handles USB On The Go FS global interrupt.
 */
 void OTG_FS_IRQHandler(void)
@@ -147,13 +171,45 @@ void I2C3_EV_IRQHandler(void)
 /**
 * @brief This function handles System tick timer.
 */
+
+static void (*startup_timer_func)() = 0;
+static int startup_timer_period_ms = 0;
+static int startup_timer_count = 0;
+
+void AttachStartupTimerHandler(void (*func)(), int period_ms)
+{
+	startup_timer_period_ms = period_ms;
+	startup_timer_count = 0;
+	startup_timer_func = func;
+}
+
+void DetachStartupTimerHandler()
+{
+	startup_timer_func = 0;
+	startup_timer_period_ms = 0;
+	startup_timer_count = 0;
+}
+
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
 
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
-  HAL_SYSTICK_IRQHandler();
+#if 0
+  HAL_SYSTICK_IRQHandler(); /* Todo:  not used, remove */
+#endif
+#ifdef ENABLE_IOCX
+  HAL_IOCX_SysTick_Handler();
+#endif
+  void (*cached_startup_timer_func)() = startup_timer_func;
+  if (cached_startup_timer_func) {
+	  startup_timer_count++;
+	  if (startup_timer_count >= startup_timer_period_ms) {
+		  startup_timer_count = 0;
+		  cached_startup_timer_func();
+	  }
+  }
   /* USER CODE BEGIN SysTick_IRQn 1 */
 
   /* USER CODE END SysTick_IRQn 1 */
@@ -220,12 +276,72 @@ void USART6_IRQHandler(void)
 }
 
 /**
+* @brief This function handles EXTI Line[0] interrupt.
+*/
+void EXTI0_IRQHandler(void)
+{
+  HAL_NVIC_ClearPendingIRQ(EXTI0_IRQn);
+#ifdef GPIO_MAP_NAVX_PI
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0); /*  */
+#endif
+}
+
+/**
+* @brief This function handles EXTI Line[1] interrupt.
+*/
+void EXTI1_IRQHandler(void)
+{
+  HAL_NVIC_ClearPendingIRQ(EXTI1_IRQn);
+#ifdef GPIO_MAP_NAVX_PI
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_1); /*  */
+#endif
+}
+
+/**
+* @brief This function handles EXTI Line[2] interrupt.
+*/
+void EXTI2_IRQHandler(void)
+{
+  HAL_NVIC_ClearPendingIRQ(EXTI2_IRQn);
+#ifdef GPIO_MAP_NAVX_PI
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_2); /*  */
+#endif
+}
+
+/**
+* @brief This function handles EXTI Line[3] interrupt.
+*/
+void EXTI3_IRQHandler(void)
+{
+  HAL_NVIC_ClearPendingIRQ(EXTI3_IRQn);
+#ifdef GPIO_MAP_NAVX_PI
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_3); /*  */
+#endif
+  }
+
+/**
+* @brief This function handles EXTI Line[4] interrupt.
+*/
+void EXTI4_IRQHandler(void)
+{
+  // CAN Interrupt on VMX-pi
+  HAL_NVIC_ClearPendingIRQ(EXTI4_IRQn);
+#ifdef GPIO_MAP_NAVX_PI
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4); /*  */
+#endif
+}
+
+/**
 * @brief This function handles EXTI Line[9:5] interrupts.
 */
 void EXTI9_5_IRQHandler(void)
 {
   HAL_NVIC_ClearPendingIRQ(EXTI9_5_IRQn);
-
+#ifdef GPIO_MAP_NAVX_PI
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_5); /*  */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_6); /*  */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7); /*  */
+#endif
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_8); /* MPU9250 on navX-MXP, navX-PI */
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_9); /* CAL BTN on navX-MXP */
 }
@@ -236,7 +352,14 @@ void EXTI9_5_IRQHandler(void)
 void EXTI15_10_IRQHandler(void)
 {
   HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
-  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_11); /* CAL BTN on navX-PI */
+#ifdef GPIO_MAP_NAVX_PI
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_10); /* CAL BTN on navX-PI */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_11);
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_12);
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_13);
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_14);
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_15);
+#endif
 }
 
 /* USER CODE BEGIN 1 */
@@ -264,6 +387,91 @@ void DMA2_Stream4_IRQHandler(void)
 
 void HardFault_Handler(void)
 {
+}
+
+/**
+* @brief This function handles TIM1 break interrupt and TIM9 global interrupt.
+*/
+void TIM1_BRK_TIM9_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_BRK_TIM9_IRQn 0 */
+
+  /* USER CODE END TIM1_BRK_TIM9_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  HAL_TIM_IRQHandler(&htim9);
+  /* USER CODE BEGIN TIM1_BRK_TIM9_IRQn 1 */
+
+  /* USER CODE END TIM1_BRK_TIM9_IRQn 1 */
+}
+
+/**
+* @brief This function handles TIM1 capture compare interrupt.
+*/
+void TIM1_CC_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_CC_IRQn 0 */
+
+  /* USER CODE END TIM1_CC_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_CC_IRQn 1 */
+
+  /* USER CODE END TIM1_CC_IRQn 1 */
+}
+
+/**
+* @brief This function handles TIM2 global interrupt.
+*/
+void TIM2_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM2_IRQn 0 */
+
+  /* USER CODE END TIM2_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim2);
+  /* USER CODE BEGIN TIM2_IRQn 1 */
+
+  /* USER CODE END TIM2_IRQn 1 */
+}
+
+/**
+* @brief This function handles TIM3 global interrupt.
+*/
+void TIM3_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM3_IRQn 0 */
+
+  /* USER CODE END TIM3_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim3);
+  /* USER CODE BEGIN TIM3_IRQn 1 */
+
+  /* USER CODE END TIM3_IRQn 1 */
+}
+
+/**
+* @brief This function handles TIM4 global interrupt.
+*/
+void TIM4_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM4_IRQn 0 */
+
+  /* USER CODE END TIM4_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim4);
+  /* USER CODE BEGIN TIM4_IRQn 1 */
+
+  /* USER CODE END TIM4_IRQn 1 */
+}
+
+/**
+* @brief This function handles TIM5 global interrupt.
+*/
+void TIM5_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM5_IRQn 0 */
+
+  /* USER CODE END TIM5_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim5);
+  /* USER CODE BEGIN TIM5_IRQn 1 */
+
+  /* USER CODE END TIM5_IRQn 1 */
 }
 
 /* USER CODE END 1 */

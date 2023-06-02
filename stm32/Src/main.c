@@ -34,10 +34,25 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f4xx_hal.h"
+#include "stm32f4xx_it.h"
 #include "usb_device.h"
 /* USER CODE BEGIN Includes */
 #include "navx-mxp.h"
+#include "iocx.h"
 #include "navx-mxp_hal.h"
+<<<<<<< HEAD
+=======
+#ifdef ENABLE_IOCX
+#include "gpio_navx-pi.h"
+#include "adc_navx-pi.h"
+#endif
+#ifdef ENABLE_CAN_TRANSCEIVER
+#include "CAN.h"
+#endif
+#ifdef ENABLE_MISC
+#include "MISC.h"
+#endif
+>>>>>>> navX-PI-Dev
 /* USER CODE END Includes */
 
 /* Private variables ---------------------------------------------------------*/
@@ -53,18 +68,24 @@ DMA_HandleTypeDef hdma_spi1_rx;
 UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_usart6_tx;
 
+#ifdef ENABLE_RTC
+RTC_HandleTypeDef hrtc;
+#endif
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
+static int MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_I2C3_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_SPI2_Init(void);
 static void MX_USART6_UART_Init(void);
+static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -93,29 +114,42 @@ static void MX_USART6_UART_Init(void);
 
 /* USER CODE BEGIN 0 */
 
+void USB_Soft_Disconnect_Signal()
+{
+	GPIO_InitTypeDef GPIO_InitStruct;
+	/* In case of disconnect, ensure the USB host    */
+	/* sees the D+ USB signal lines low.  Note that  */
+	/* the onboard EMI Filter has a 1.5K ohm pullup, */
+	/* therefore this causes 2.2mA of current to be  */
+	/* sunk into this pin.                           */
+
+	GPIO_InitStruct.Pin = GPIO_PIN_12;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_LOW;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	HAL_GPIO_WritePin( GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+	HAL_Delay(1);
+}
+
+void USB_Soft_Connect_Request()
+{
+	/* In case of connect request, ensure the USB host  */
+	/* sees the D+ USB signal line high (full speed).   */
+	GPIO_InitTypeDef GPIO_InitStruct;
+	GPIO_InitStruct.Pin = GPIO_PIN_12;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_LOW;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
 void USB_Soft_Disconnect()
 {
-    GPIO_InitTypeDef GPIO_InitStruct;
-    /* In case of soft reset, ensure the USB host    */
-    /* sees the D+ USB signal lines low.  Note that  */
-    /* the onboard EMI Filter has a 1.5K ohm pullup, */
-    /* therefore this causes 2.2mA of current to be  */
-    /* sunk into this pin.                           */
-
-    GPIO_InitStruct.Pin = GPIO_PIN_12;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_LOW;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    /* Wait a bit for the usb host to discover the reset */
-    HAL_Delay(2000);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_12;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_LOW;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	USB_Soft_Disconnect_Signal();
+	/* Wait a bit for the usb host to discover the reset */
+	HAL_Delay(20);
+	USB_Soft_Connect_Request();
 }
 
 /* USER CODE END 0 */
@@ -132,11 +166,14 @@ int main(void)
     /* MCU Configuration----------------------------------------------------------*/
     /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
     HAL_Init();
-    /* Configure the system clock */
-    SystemClock_Config();
-    MX_GPIO_Init();
 
-    USB_Soft_Disconnect();
+    int board_rev = MX_GPIO_Init();
+
+    /* In case of software reset, forcibly indicate USB device disconnection */
+    USB_Soft_Disconnect_Signal();
+
+     /* Configure the system clock */
+    SystemClock_Config(); // Note that this may several seconds to complete
 
     MX_DMA_Init();
     MX_I2C2_Init();
@@ -157,30 +194,87 @@ int main(void)
 
 #ifdef ENABLE_CAN_TRANSCEIVER
     MX_SPI2_Init();
-    HAL_MCP25625_Wake();
-    //HAL_MCP25625_Test();
-#endif
-
-#if (defined(ENABLE_QUAD_DECODERS) || defined(ENABLE_PWM_GENERATION))
-    MX_TIM1_Init();
-    MX_TIM2_Init();
-    MX_TIM3_Init();
-    MX_TIM4_Init();
-    MX_TIM5_Init();
 #endif
 
 #if defined(ENABLE_ADC)
     MX_ADC1_Init();
 #endif
 
+    /* Clearly signal USB device is now connected and available for enumeration, */
+    /* before initializing USB Device.                                           */
+    USB_Soft_Connect_Request();
+
     MX_USB_DEVICE_Init();
+
+#if defined(ENABLE_RTC)
+    MX_RTC_Init();
+#endif
     /* USER CODE BEGIN 2 */
+#ifdef ENABLE_IOCX
+    HAL_IOCX_Init(board_rev);  // Ensure board_rev is registered BEFORE nav10_init() is invoked.
+#endif
     nav10_init();
+#ifdef ENABLE_IOCX
+
+#define IOCX_BANK_NUMBER 1
+#define IOCX_EX_BANK_NUMBER 4
+    /* The IOCX handlers process both the IOCX and the IOCX_EX Banks */
+
+#ifdef ENABLE_HIGHRESOLUTION_TIMESTAMP
+    HAL_IOCX_HIGHRESTIMER_Init();
+#endif
+    IOCX_init();
+    nav10_set_loop(IOCX_BANK_NUMBER, IOCX_loop);
+    nav10_set_register_lookup_func(IOCX_BANK_NUMBER, IOCX_get_reg_addr_and_max_size);
+    nav10_set_register_write_func(IOCX_BANK_NUMBER, IOCX_banked_writable_reg_update_func);
+    nav10_set_loop(IOCX_EX_BANK_NUMBER, IOCX_loop);
+    nav10_set_register_lookup_func(IOCX_EX_BANK_NUMBER, IOCX_get_reg_addr_and_max_size);
+    nav10_set_register_write_func(IOCX_EX_BANK_NUMBER, IOCX_banked_writable_reg_update_func);
+#endif // ENABLE_IOCX
+#ifdef ENABLE_CAN_TRANSCEIVER
+#define CAN_BANK_NUMBER 2
+    CAN_init();
+    nav10_set_loop(CAN_BANK_NUMBER, CAN_loop);
+    nav10_set_register_lookup_func(CAN_BANK_NUMBER, CAN_get_reg_addr_and_max_size);
+    nav10_set_register_write_func(CAN_BANK_NUMBER, CAN_banked_writable_reg_update_func);
+#endif // ENABLE_CAN_TRANSCEIVER
+#ifdef ENABLE_MISC
+#define MISC_BANK_NUMBER 3
+    MISC_init();
+    nav10_set_loop(MISC_BANK_NUMBER, MISC_loop);
+    nav10_set_register_lookup_func(MISC_BANK_NUMBER, MISC_get_reg_addr_and_max_size);
+    nav10_set_register_write_func(MISC_BANK_NUMBER, MISC_banked_writable_reg_update_func);
+#endif // ENABLE_MISC
     /* USER CODE END 2 */
 
     nav10_main();
 
     return 0; /* Note:  Control will never reach this point. */
+}
+
+int system_clock_bringup_state = 0;
+void UpdateSystemClockBringupStatus()
+{
+	int can = 1;
+	int cal = 1;
+	if (system_clock_bringup_state > 0) {
+		can = 0;
+		system_clock_bringup_state = 0;
+	} else {
+		system_clock_bringup_state++;
+	}
+	HAL_CAL_LED_On(cal);
+
+	HAL_CAN_Status_LED_On(can);
+	HAL_LED1_On(can);
+	HAL_LED2_On(can);
+}
+
+void ClearSystemClockBringupStatus() {
+	HAL_CAN_Status_LED_On(0);
+	HAL_CAL_LED_On(0);
+	HAL_LED1_On(0);
+	HAL_LED2_On(0);
 }
 
 /** System Clock Configuration
@@ -189,23 +283,55 @@ void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct;
     RCC_ClkInitTypeDef RCC_ClkInitStruct;
+    RCC_PeriphCLKInitTypeDef PeriphClkInitStruct;
+
+    HAL_LED_Init(); // Initialize LEDs, which are used to display status
+    UpdateSystemClockBringupStatus();
+    AttachStartupTimerHandler(UpdateSystemClockBringupStatus, 500 /* ms */);
+
     __PWR_CLK_ENABLE();
-    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+#ifdef ENABLE_LSE
+    RCC_OscInitStruct.OscillatorType |= RCC_OSCILLATORTYPE_LSE;
+    RCC_OscInitStruct.LSEState = RCC_LSE_ON;
+#endif // ENABLE_LSE
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
     RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
     RCC_OscInitStruct.PLL.PLLM = 8;
     RCC_OscInitStruct.PLL.PLLN = 384;
     RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
     RCC_OscInitStruct.PLL.PLLQ = 8;
-    HAL_RCC_OscConfig(&RCC_OscInitStruct);
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1;
+    int osc_ready = 0;
+    while(!osc_ready) {
+    	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) == HAL_OK) {
+    		osc_ready = 1;
+    	}
+    }
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                                |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
     RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4; // 24Mhz.  Was RCC_HCLK_DIV2 (48Mhz);
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3 );
+
+    int clocks_ready = 0;
+    while (!clocks_ready) {
+    	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3 ) == HAL_OK) {
+    		clocks_ready = 1;
+    	}
+    }
+#ifdef ENABLE_LSE
+#ifdef ENABLE_RTC
+    /* Feed Real-time Clock via Low-Speed External (LSE) */
+    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_RTC;
+    PeriphClkInitStruct.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
+    HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct);
+#endif // ENABLE_RTC
+#endif // ENABLE_LSE
+    DetachStartupTimerHandler();
+    ClearSystemClockBringupStatus();
 }
 
 /* I2C2 init function */
@@ -280,12 +406,11 @@ void MX_SPI2_Init(void)
   /* Configure for MODE 0 (which is used by the MCP25625) */
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi2.Init.NSS = SPI_NSS_HARD_OUTPUT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi2.Init.NSS = SPI_NSS_SOFT; /* NOTE:  Software SPI Chip select used (HW CS doesn't work w/MCP256525) */
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2; /* APB1(24Mhz)/4 = 6Mhz.  MCP25625:  Max 10Mhz */
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLED;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLED;
-  hspi2.Init.CRCPolynomial = 10;
   HAL_SPI_Init(&hspi2);
 #endif
 }
@@ -314,10 +439,12 @@ void MX_USART6_UART_Init(void)
  * Free pins are configured automatically as Analog (this feature is enabled through
  * the Code Generation settings)
  */
-void MX_GPIO_Init(void)
+int MX_GPIO_Init(void)
 {
+	int board_rev = 7; // Board revisions are 3-bit values (0-7).  Default is 7.
+
 #ifdef GPIO_MAP_NAVX_PI
-    MX_GPIO_Init_NavX_PI();
+    board_rev = MX_GPIO_Init_NavX_PI();
 #else
 	GPIO_InitTypeDef GPIO_InitStruct;
 
@@ -387,6 +514,7 @@ void MX_GPIO_Init(void)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 #endif
+    return board_rev;
 }
 
 /**
@@ -415,7 +543,66 @@ void MX_DMA_Init(void)
 #endif
 #ifdef ENABLE_ADC
     HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 6, 0); /* ADC */
-    //HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
+    HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
+#endif
+}
+
+/* RTC init function */
+void MX_RTC_Init(void)
+{
+#ifdef ENABLE_RTC
+
+	RTC_TimeTypeDef sTime;
+	RTC_DateTypeDef sDate;
+
+	/**Initialize RTC and set the Time and Date
+	*/
+	hrtc.Instance = RTC;
+
+	int calendar_initialized = ((hrtc.Instance->ISR & RTC_FLAG_INITS) != 0);
+
+	/* Check if RTC is already initialized (via INITS flag)        */
+	/* The RTC "backup domain" is powered by a dedicated battery,  */
+	/* and the calendar should only be initialized if it has not   */
+	/* yet been programmed.  The calendar is cleared if there is   */
+	/* ever a "backup domain" reset.                               */
+
+	if (!calendar_initialized) {
+
+		hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+
+		/* The LSE is a 32.768 Khz clock, and the Real Time Clock's   */
+		/* desired subsecond resolution is sub 1ms.  Therefore, at    */
+		/* the cost of some extra current consumption, the predivisor */
+		/* is configured to yield 2 ticks per millisecond, using this */
+		/* formula, documented in the STM32 datasheet:                */
+		/* RTCCLK / ((AsynchPrediv + 1) * (SynchPrediv + 1))          */
+		/* RTCCLK=32768, AsynchPrediv=15, SynchPrediv=2047            */
+		/* Result:  1Hz total (32768/16*2048)                         */
+		/*          Subsecond resolution:  1/2048                     */
+
+		hrtc.Init.AsynchPrediv = 15;
+		hrtc.Init.SynchPrediv = 2047;
+		hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+		hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+		hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+		HAL_RTC_Init(&hrtc);
+
+		sTime.Hours = 0x0;
+		sTime.Minutes = 0x0;
+		sTime.Seconds = 0x0;
+		sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+		sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+		HAL_RTC_SetTime(&hrtc, &sTime, FORMAT_BIN);
+
+		sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+		sDate.Month = RTC_MONTH_JANUARY;
+		sDate.Date = 0x1;
+		sDate.Year = 0x1;
+
+		HAL_RTC_SetDate(&hrtc, &sDate, FORMAT_BIN);
+	}
+	HAL_RTC_InitializeCache();
 #endif
 }
 

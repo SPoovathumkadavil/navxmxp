@@ -37,6 +37,12 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+#define _EXTERN_ATTRIB extern "C"
+#else
+#define _EXTERN_ATTRIB
+#endif
+
 /**
  * The kind of transition on an external pin which should trigger an
  * interrupt.
@@ -67,7 +73,11 @@ typedef enum ExtIntTriggerMode {
  *  @sideeffect Registers a handler
  *  @see detachInterrupt()
  */
+<<<<<<< HEAD
 void attachInterrupt(uint16_t pin, void (*func)(unsigned char), ExtIntTriggerMode mode);
+=======
+_EXTERN_ATTRIB void attachInterrupt(uint16_t pin, void (*func)(uint8_t), ExtIntTriggerMode mode);
+>>>>>>> navX-PI-Dev
 
 /**
  * @brief Disable any registered external interrupt.
@@ -75,7 +85,7 @@ void attachInterrupt(uint16_t pin, void (*func)(unsigned char), ExtIntTriggerMod
  * @sideeffect unregisters external interrupt handler
  * @see attachInterrupt()
  */
-void detachInterrupt(uint16_t pin);
+_EXTERN_ATTRIB void detachInterrupt(uint16_t pin);
 
 /**
  * Re-enable interrupts.

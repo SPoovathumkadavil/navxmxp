@@ -31,8 +31,13 @@
  */
 
 #include "ext_interrupts.h"
+#include "stm32f4xx.h"
 
+<<<<<<< HEAD
 static void (*func_array[16])(unsigned char) = {
+=======
+static void (*func_array[16])(uint8_t) = {
+>>>>>>> navX-PI-Dev
 		0, 0, 0, 0,
 		0, 0, 0, 0,
 		0, 0, 0, 0,
@@ -42,6 +47,7 @@ static void (*func_array[16])(unsigned char) = {
 extern "C" {
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+<<<<<<< HEAD
 	for ( int i = 0; i < 16; i++ ) {
 		if ( GPIO_Pin & (1 << i) ) {
 			if ( func_array[i] != 0 ) {
@@ -49,6 +55,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 			}
 			break;
 		}
+=======
+	uint8_t i = POSITION_VAL(GPIO_Pin);
+	if ( func_array[i] != 0 ) {
+		func_array[i](i);
+>>>>>>> navX-PI-Dev
 	}
 }
 }
@@ -60,6 +71,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
  * @param mode    Trigger mode for the given interrupt.
  * @see ExtIntTriggerMode
  */
+<<<<<<< HEAD
 void attachInterrupt(uint16_t pin, void (*func)(unsigned char), ExtIntTriggerMode mode) {
 	for ( int i = 0; i < 16; i++ ) {
 		if ( pin & (1 << i) ) {
@@ -67,17 +79,16 @@ void attachInterrupt(uint16_t pin, void (*func)(unsigned char), ExtIntTriggerMod
 			break;
 		}
 	}
+=======
+void attachInterrupt(uint16_t GPIO_Pin, void (*func)(uint8_t), ExtIntTriggerMode mode) {
+	func_array[POSITION_VAL(GPIO_Pin)] = func;
+>>>>>>> navX-PI-Dev
 }
 
 /**
  * @brief Disable any external interrupt attached to a pin.
  * @param pin Pin number to detach any interrupt from.
  */
-void detachInterrupt(uint8_t pin) {
-	for ( int i = 0; i < 16; i++ ) {
-		if ( pin & (1 << i) ) {
-			func_array[i] = 0;
-			break;
-		}
-	}
+void detachInterrupt(uint8_t GPIO_Pin) {
+	func_array[POSITION_VAL(GPIO_Pin)] = 0;
 }

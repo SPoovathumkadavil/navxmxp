@@ -13,7 +13,7 @@ using System.IO.Ports;
 using NetDFULib;
 using navXComUtilities;
 
-namespace navXFirmwareUpdater
+namespace VMXFirmwareUpdater
 {
     public partial class Form1 : Form
     {
@@ -113,7 +113,7 @@ namespace navXFirmwareUpdater
                     Application.DoEvents();
                     dialog_in_progress = true;
                     MessageBox.Show("Error opening port.  " + ex.Message,
-                                     "navXFirmwareUpdater",
+                                     "VMXFirmwareUpdater",
                                      MessageBoxButtons.OK,
                                      MessageBoxIcon.Error);
                     dialog_in_progress = false;
@@ -408,9 +408,16 @@ namespace navXFirmwareUpdater
                                     {
                                         boardType.Text = "navX-Micro";
                                     }
+<<<<<<< HEAD
 									else if ((hwrev >= 60) && (hwrev <= 69)) {
 										boardType.Text = "VMX-pi";
 									}									
+=======
+                                    else if ((hwrev >= 60) && (hwrev <= 69))
+                                    {
+                                        boardType.Text = "VMX-pi";
+                                    }
+>>>>>>> navX-PI-Dev
                                 }
                                 else
                                 {
@@ -482,18 +489,26 @@ namespace navXFirmwareUpdater
             // Create an instance of the open file dialog box.
             OpenFileDialog openFileDialog1 = new OpenFileDialog();
             // Set filter options and filter index.
-            String default_firmware_dir = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal) + "\\navx-mxp\\firmware\\";
+            String default_firmware_dir = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal) + "\\vmx-pi\\firmware\\";
             if (Directory.Exists(default_firmware_dir))
             {
                 openFileDialog1.InitialDirectory = default_firmware_dir;
             }
             else
             {
-                default_firmware_dir = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal) + "\\navx-micro\\firmware\\";
+                default_firmware_dir = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal) + "\\navx-mxp\\firmware\\";
                 if (Directory.Exists(default_firmware_dir))
                 {
                     openFileDialog1.InitialDirectory = default_firmware_dir;
                 }
+                else
+                {
+                    default_firmware_dir = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal) + "\\navx-micro\\firmware\\";
+                    if (Directory.Exists(default_firmware_dir))
+                    {
+                        openFileDialog1.InitialDirectory = default_firmware_dir;
+                    }
+                }            
             }
             openFileDialog1.RestoreDirectory = false;
             openFileDialog1.Filter = "Hex Files (.hex)|*.hex";
@@ -509,7 +524,7 @@ namespace navXFirmwareUpdater
             // Process input if the user clicked OK.
             if (userClickedOK == true)
             {
-                navXHexFilePath.Text = Path.GetFileName(openFileDialog1.FileName);
+                hexFilePath.Text = Path.GetFileName(openFileDialog1.FileName);
                 full_path_to_hex_file = openFileDialog1.FileName;
             }
         }
@@ -556,13 +571,13 @@ namespace navXFirmwareUpdater
                 progressBar1.Visible = false;
                 Application.DoEvents();
                 dialog_in_progress = true;
-                MessageBox.Show("To update navX-Model Firmware, ensure the device is in Firmware Update Mode.\n\n" +
+                MessageBox.Show("To update VMX-Model Firmware, ensure the device is in Firmware Update Mode.\n\n" +
                                 "1. Disconnect the device from the PC USB port.\n" +
-                                "2. Ensure the device has completely powered down (the RED 3.3V LED must be off).\n" +
+                                "2. Ensure the device has completely powered down (the '3.3V' LED must be off).\n" +
                                 "3. While holding down the 'CAL' button, re-connect the device to the PC USB port.\n\n" +
                                 "4. After the device has powered up, release the 'CAL' button.\n" + 
-                                "When in DFU mode, only the RED power LED will be ON.",
-                                "navX-Model Firmware Update",
+                                "When in DFU mode, only the '3.3V' LED will be ON.",
+                                "VMX-Model Firmware Update",
                                 MessageBoxButtons.OK,
                                 MessageBoxIcon.Warning);
                 dialog_in_progress = false;
@@ -580,8 +595,8 @@ namespace navXFirmwareUpdater
                 progressBar1.Visible = false;
                 Application.DoEvents();
                 dialog_in_progress = true;
-                MessageBox.Show("Error converting " + navXHexFilePath.Text + " to DFU format.",
-                                "navX-Model Firmware Update",
+                MessageBox.Show("Error converting " + hexFilePath.Text + " to DFU format.",
+                                "VMX-Model Firmware Update",
                                 MessageBoxButtons.OK,
                                 MessageBoxIcon.Error);
                 dialog_in_progress = false;
@@ -605,7 +620,7 @@ namespace navXFirmwareUpdater
                 firmwareUpdate_OnFirmwareUpdateProgress(this, fupea);
                 dialog_in_progress = true;
                 MessageBox.Show("Error parsing DFU file. " + ex.Message,
-                                "navX-Model Firmware Update",
+                                "VMX-Model Firmware Update",
                                 MessageBoxButtons.OK,
                                 MessageBoxIcon.Error);
                 dialog_in_progress = false;
@@ -631,7 +646,7 @@ namespace navXFirmwareUpdater
                 firmwareUpdate_OnFirmwareUpdateProgress(this,fupea);
                 dialog_in_progress = true;
                 MessageBox.Show("Error deploying DFU file. " + ex.Message,
-                                "navX-Model Firmware Update",
+                                "VMX-Model Firmware Update",
                                 MessageBoxButtons.OK,
                                 MessageBoxIcon.Error);
                 dialog_in_progress = false;
@@ -649,7 +664,7 @@ namespace navXFirmwareUpdater
             progressBar.Invoke(new Action(() => progressBar.Value = (int)e.Percentage));
             if (e.Percentage == 100)
             {
-                form1.Invoke(new Action(() => MessageBox.Show("Firmware Update Complete.\n\nYou can verify the version on the 'Currently-loaded Firmware Version' tab.","navX-Model Firmware Updater",
+                form1.Invoke(new Action(() => MessageBox.Show("Firmware Update Complete.\n\nYou can verify the version on the 'Currently-loaded Firmware Version' tab.","VMX-Model Firmware Updater",
                     MessageBoxButtons.OK, MessageBoxIcon.Information)));
             }
         }
