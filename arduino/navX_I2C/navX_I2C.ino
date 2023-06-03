@@ -1,10 +1,8 @@
 #include <Wire.h>
-
 #include "AHRSWrapper.h"
 
-byte data[512];
-
 #define ITERATION_DELAY_MS 10
+
 AHRS ahrs = AHRS::getInstance();
 
 void setup() {
