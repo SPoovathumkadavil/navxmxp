@@ -9,7 +9,6 @@
 class AHRS {
  public:
   static AHRS getInstance();
-  AHRS();
   void transmit();
   void receive();
   float getYaw();
@@ -18,6 +17,7 @@ class AHRS {
   float getHeading();
 
  private:
+  AHRS();
   uint8_t data[512];
   int register_address = NAVX_REG_YAW_L;
   float yaw;
